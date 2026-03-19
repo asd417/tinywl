@@ -1,5 +1,3 @@
 tinywl
 builddir
 .vscode
-*-protocol.c
-*-protocol.h
