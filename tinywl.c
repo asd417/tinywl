@@ -27,98 +27,8 @@
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
-/* For brevity's sake, struct members are annotated where they are used. */
-enum tinywl_cursor_mode {
-	TINYWL_CURSOR_PASSTHROUGH,
-	TINYWL_CURSOR_MOVE,
-	TINYWL_CURSOR_RESIZE,
-};
+#include "tinywl.h"
 
-struct tinywl_server {
-	struct wl_display *wl_display;
-	struct wlr_backend *backend;
-	struct wlr_renderer *renderer;
-	struct wlr_allocator *allocator;
-	struct wlr_scene *scene;
-	struct wlr_scene_output_layout *scene_layout;
-
-	struct wlr_xdg_shell *xdg_shell;
-	struct wl_listener new_xdg_toplevel;
-	struct wl_listener new_xdg_popup;
-	struct wl_list toplevels;
-
-	struct wlr_cursor *cursor;
-	struct wlr_xcursor_manager *cursor_mgr;
-	struct wl_listener cursor_motion;
-	struct wl_listener cursor_motion_absolute;
-	struct wl_listener cursor_button;
-	struct wl_listener cursor_axis;
-	struct wl_listener cursor_frame;
-
-	struct wlr_seat *seat;
-	struct wl_listener new_input;
-	struct wl_listener request_cursor;
-	struct wl_listener pointer_focus_change;
-	struct wl_listener request_set_selection;
-	struct wl_list keyboards;
-	enum tinywl_cursor_mode cursor_mode;
-	struct tinywl_toplevel *grabbed_toplevel;
-	double grab_x, grab_y;
-	struct wlr_box grab_geobox;
-	uint32_t resize_edges;
-
-	struct wlr_output_layout *output_layout;
-	struct wl_list outputs;
-	struct wl_listener new_output;
-
-  struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
-  struct wl_listener new_xdg_decoration;
-};
-
-struct tinywl_output {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_output *wlr_output;
-	struct wl_listener frame;
-	struct wl_listener request_state;
-	struct wl_listener destroy;
-};
-
-struct tinywl_toplevel {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_xdg_toplevel *xdg_toplevel;
-	struct wlr_scene_tree *scene_tree;
-  struct wlr_scene_rect *title_bar;
-	struct wl_listener map;
-	struct wl_listener unmap;
-	struct wl_listener commit;
-	struct wl_listener destroy;
-	struct wl_listener request_move;
-	struct wl_listener request_resize;
-	struct wl_listener request_maximize;
-	struct wl_listener request_fullscreen;
-
-  struct wlr_xdg_toplevel_decoration_v1 *decoration;
-  struct wl_listener decoration_request_mode;
-  struct wl_listener decoration_destroy;
-};
-
-struct tinywl_popup {
-	struct wlr_xdg_popup *xdg_popup;
-	struct wl_listener commit;
-	struct wl_listener destroy;
-};
-
-struct tinywl_keyboard {
-	struct wl_list link;
-	struct tinywl_server *server;
-	struct wlr_keyboard *wlr_keyboard;
-
-	struct wl_listener modifiers;
-	struct wl_listener key;
-	struct wl_listener destroy;
-};
 
 static void focus_toplevel(struct tinywl_toplevel *toplevel) {
 	/* Note: this function only deals with keyboard focus. */
@@ -547,14 +457,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
     printf("DEBUG: Button released, resetting mode\n");
 		/* If you released any buttons, we exit interactive move/resize mode. */
-		bool was_interactive = (server->cursor_mode == TINYWL_CURSOR_MOVE || server->cursor_mode == TINYWL_CURSOR_RESIZE);
     reset_cursor_mode(server);
-    
-    //Workaround for kitty window drag sticking. might not be necessary with ssd
-    //if (was_interactive) {
-      //wlr_seat_pointer_notify_clear_focus(server->seat);
-      //printf("clear focus\n");
-    //}
 	} else {
 		/* Focus that client if the button was _pressed_ */
 		double sx, sy;
@@ -691,6 +594,11 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	/* Called when the surface is mapped, or ready to display on-screen. */
 	struct tinywl_toplevel *toplevel = wl_container_of(listener, toplevel, map);
+  
+  struct wlr_box geom;
+  geom = toplevel->xdg_toplevel->base->current.geometry;
+  wlr_scene_rect_set_size(toplevel->title_bar, geom.width, 20);
+
 
 	wl_list_insert(&toplevel->server->toplevels, &toplevel->link);
 
@@ -916,7 +824,7 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 static void decoration_handle_request_mode(struct wl_listener *listener, void *data) {
     struct tinywl_toplevel *toplevel = 
         wl_container_of(listener, toplevel, decoration_request_mode);
-    
+    printf("Client requested mode: %d\n", toplevel->decoration->requested_mode);
     /* Safety check */
     if (toplevel->decoration && toplevel->xdg_toplevel->base->surface->mapped) {
         wlr_xdg_toplevel_decoration_v1_set_mode(toplevel->decoration, 
@@ -1043,6 +951,11 @@ int main(int argc, char *argv[]) {
 	 */
 	server.scene = wlr_scene_create();
 	server.scene_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+
+  float bg_color[4] = {0.1f, 0.1f, 0.15f, 1.0f};
+  server.background_rect = wlr_scene_rect_create(&server.scene->tree, 
+    9999, 9999, bg_color);
+  wlr_scene_node_lower_to_bottom(&server.background_rect->node);
 
 	/* Set up xdg-shell version 3. The xdg-shell is a Wayland protocol which is
 	 * used for application windows. For more detail on shells, refer to
