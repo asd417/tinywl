@@ -2,7 +2,8 @@ project('tinywl', 'c',
   default_options: [
     'c_std=c11',
     'pkg_config_path=/usr/local/lib/pkgconfig'
-  ]
+  ],
+  meson_version: '>=1.8.0'
 )
 
 # --- 1. Project Arguments & Endianness ---
@@ -18,36 +19,26 @@ add_project_arguments([
 ], language: 'c')
 
 # --- 2. Dependencies ---
+wl_mod = import('wayland')
+
+# In 2026, wlroots 0.20 is the current stable/RC series
 wlroots = dependency('wlroots-0.20')
 wayland_client = dependency('wayland-client')
 wayland_server = dependency('wayland-server')
 wayland_protos = dependency('wayland-protocols')
 xkbcommon = dependency('xkbcommon')
-# native: true ensures we get the scanner for the build machine (to run it)
-wayland_scanner = dependency('wayland-scanner', native: true)
 
-# --- 3. Protocol Generation ---
-# Get the scanner executable and the protocols directory
-scanner_bin = find_program(wayland_scanner.get_variable('wayland_scanner'))
+# --- 3. Protocol Generation (The "Meson Way") ---
 protocols_dir = wayland_protos.get_variable('pkgdatadir')
+
+# Instead of custom_target, use wl_mod.scan_xml for EVERYTHING. 
+# It handles the scanner_bin and dependency tracking internally.
 xdg_shell_xml = protocols_dir / 'stable/xdg-shell/xdg-shell.xml'
+xdg_shell_protos = wl_mod.scan_xml(xdg_shell_xml, server: true, client: false)
 
-# We need TWO targets: one for the header (.h) and one for the code (.c)
-xdg_shell_header = custom_target(
-    'xdg-shell-header',
-    output: 'xdg-shell-protocol.h',
-    input: xdg_shell_xml,
-    command: [scanner_bin, 'server-header', '@INPUT@', '@OUTPUT@'],
-)
+custom_protocol_xml = 'my-protocol.xml'
+custom_protos = wl_mod.scan_xml(custom_protocol_xml, server: true, client: true)
 
-xdg_shell_code = custom_target(
-    'xdg-shell-code',
-    output: 'xdg-shell-protocol.c',
-    input: xdg_shell_xml,
-    command: [scanner_bin, 'private-code', '@INPUT@', '@OUTPUT@'],
-)
-
-# Cross-platform/Old Glibc fix for clocks
 cc = meson.get_compiler('c')
 rt_dep = cc.find_library('rt', required: false)
 
@@ -56,15 +47,15 @@ executable(
     'tinywl',
     [
         'tinywl.c', 
-        xdg_shell_header, 
-        xdg_shell_code
+        xdg_shell_protos,
+		custom_protos
     ],
     dependencies: [
         wlroots, 
         wayland_client,
 		wayland_server,
 		xkbcommon,
-		rt_dep
+		rt_dep,
     ],
     install: true
 )
