@@ -1,4 +1,4 @@
-# wlroots-tinywl
+# Personal Wayland Playground
 
 A wayland compositor based on wlroots and tinywl, written in c. This is really just for me to hack on wayland. Code copied from the official wlroots
 
