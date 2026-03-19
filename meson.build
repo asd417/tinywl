@@ -46,16 +46,20 @@ rt_dep = cc.find_library('rt', required: false)
 executable(
     'tinywl',
     [
-        'tinywl.c', 
-        xdg_shell_protos,
-		custom_protos
+      'tinywl.c', 
+      'process.c',
+      'shell.c',
+      'decoration.c',
+      'cursor.c',
+      xdg_shell_protos,
+      custom_protos
     ],
     dependencies: [
-        wlroots, 
-        wayland_client,
-		wayland_server,
-		xkbcommon,
-		rt_dep,
+      wlroots, 
+      wayland_client,
+      wayland_server,
+      xkbcommon,
+      rt_dep,
     ],
     install: true
 )
