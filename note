@@ -1,0 +1,6 @@
+tinywl seems to pick wayland-0 
+
+run:
+
+WAYLAND_DISPLAY=wayland-0 weston-terminal
+
