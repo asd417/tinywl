@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/render/allocator.h>
@@ -22,6 +23,7 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -68,6 +70,9 @@ struct tinywl_server {
 	struct wlr_output_layout *output_layout;
 	struct wl_list outputs;
 	struct wl_listener new_output;
+
+  struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
+  struct wl_listener new_xdg_decoration;
 };
 
 struct tinywl_output {
@@ -84,6 +89,7 @@ struct tinywl_toplevel {
 	struct tinywl_server *server;
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	struct wlr_scene_tree *scene_tree;
+  struct wlr_scene_rect *title_bar;
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener commit;
@@ -92,6 +98,10 @@ struct tinywl_toplevel {
 	struct wl_listener request_resize;
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
+
+  struct wlr_xdg_toplevel_decoration_v1 *decoration;
+  struct wl_listener decoration_request_mode;
+  struct wl_listener decoration_destroy;
 };
 
 struct tinywl_popup {
@@ -535,8 +545,16 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	wlr_seat_pointer_notify_button(server->seat,
 			event->time_msec, event->button, event->state);
 	if (event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+    printf("DEBUG: Button released, resetting mode\n");
 		/* If you released any buttons, we exit interactive move/resize mode. */
-		reset_cursor_mode(server);
+		bool was_interactive = (server->cursor_mode == TINYWL_CURSOR_MOVE || server->cursor_mode == TINYWL_CURSOR_RESIZE);
+    reset_cursor_mode(server);
+    
+    //Workaround for kitty window drag sticking. might not be necessary with ssd
+    //if (was_interactive) {
+      //wlr_seat_pointer_notify_clear_focus(server->seat);
+      //printf("clear focus\n");
+    //}
 	} else {
 		/* Focus that client if the button was _pressed_ */
 		double sx, sy;
@@ -687,7 +705,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	if (toplevel == toplevel->server->grabbed_toplevel) {
 		reset_cursor_mode(toplevel->server);
 	}
-
+  wlr_scene_node_set_enabled(&toplevel->scene_tree->node, false);
 	wl_list_remove(&toplevel->link);
 }
 
@@ -716,6 +734,9 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->request_resize.link);
 	wl_list_remove(&toplevel->request_maximize.link);
 	wl_list_remove(&toplevel->request_fullscreen.link);
+  if (toplevel->scene_tree) {
+        wlr_scene_node_destroy(&toplevel->scene_tree->node);
+    }
 
 	free(toplevel);
 }
@@ -809,10 +830,18 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	struct tinywl_toplevel *toplevel = calloc(1, sizeof(*toplevel));
 	toplevel->server = server;
 	toplevel->xdg_toplevel = xdg_toplevel;
-	toplevel->scene_tree =
-		wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
+  xdg_toplevel->base->data = toplevel;
+	
+  toplevel->scene_tree = wlr_scene_tree_create(&server->scene->tree);
+  float color[4] = {0.2, 0.2, 0.8, 1.0};
+  toplevel->title_bar = wlr_scene_rect_create(toplevel->scene_tree, 20, 20, color);
+
+  struct wlr_scene_tree *xdg_tree = wlr_scene_xdg_surface_create(toplevel->scene_tree, xdg_toplevel->base);
+  wlr_scene_node_set_position(&xdg_tree->node, 0, 20);
+
+  // toplevel->scene_tree =
+	// 	wlr_scene_xdg_surface_create(&toplevel->server->scene->tree, xdg_toplevel->base);
 	toplevel->scene_tree->node.data = toplevel;
-	xdg_toplevel->base->data = toplevel->scene_tree;
 
 	/* Listen to the various events it can emit */
 	toplevel->map.notify = xdg_toplevel_map;
@@ -882,6 +911,50 @@ static void server_new_xdg_popup(struct wl_listener *listener, void *data) {
 
 	popup->destroy.notify = xdg_popup_destroy;
 	wl_signal_add(&xdg_popup->events.destroy, &popup->destroy);
+}
+
+static void decoration_handle_request_mode(struct wl_listener *listener, void *data) {
+    struct tinywl_toplevel *toplevel = 
+        wl_container_of(listener, toplevel, decoration_request_mode);
+    
+    /* Safety check */
+    if (toplevel->decoration && toplevel->xdg_toplevel->base->surface->mapped) {
+        wlr_xdg_toplevel_decoration_v1_set_mode(toplevel->decoration, 
+            WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
+}
+static void decoration_handle_destroy(struct wl_listener *listener, void *data) {
+    struct tinywl_toplevel *toplevel = 
+        wl_container_of(listener, toplevel, decoration_destroy);
+
+    /* 1. Stop listening for mode requests */
+    wl_list_remove(&toplevel->decoration_request_mode.link);
+    
+    /* 2. Stop listening for this destroy event */
+    wl_list_remove(&toplevel->decoration_destroy.link);
+
+    /* 3. Nullify the pointer so other functions don't try to use it */
+    toplevel->decoration = NULL;
+}
+
+static void server_new_xdg_decoration(struct wl_listener *listener, void *data) {
+  struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
+  struct tinywl_toplevel *toplevel = decoration->toplevel->base->data;
+  
+  /* If the toplevel isn't initialized yet, we can't hook the decoration.
+     * wlroots will usually retry this or the client will request a mode later. */
+    if (!toplevel) {
+        return; 
+    }
+  toplevel->decoration = decoration;
+  // Add a listener for when the client REQUESTS a specific mode
+  // (Kitty will usually ask for 'Client Side' or 'None' first)
+  toplevel->decoration_request_mode.notify = decoration_handle_request_mode;
+  wl_signal_add(&decoration->events.request_mode, &toplevel->decoration_request_mode);
+
+  // Also listen for when the decoration is destroyed
+  toplevel->decoration_destroy.notify = decoration_handle_destroy;
+  wl_signal_add(&decoration->events.destroy, &toplevel->decoration_destroy);
 }
 
 int main(int argc, char *argv[]) {
@@ -1037,6 +1110,11 @@ int main(int argc, char *argv[]) {
 	server.request_set_selection.notify = seat_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 			&server.request_set_selection);
+
+  server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display);
+  server.new_xdg_decoration.notify = server_new_xdg_decoration;
+  wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration, 
+      &server.new_xdg_decoration);
 
 	/* Add a Unix socket to the Wayland display. */
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
